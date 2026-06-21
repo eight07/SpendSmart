@@ -1,7 +1,7 @@
 # SpendSmart — Technical Decisions & Documentation
 
 ## Project Overview
-SpendSmart is a personal finance ML web app that predicts monthly spending per category using an ensemble of regression models. This document explains every significant decision made during the project — from data cleaning to model selection. 
+SpendSmart is a personal finance ML web app that predicts monthly spending per category using the best selected regression model. This document explains every significant decision made during the project — from data cleaning to model selection. 
 
 ---
 
@@ -80,6 +80,12 @@ At prediction time (beginning of a new month), we don't yet know how much will b
 | `PrevMonthSpend` | This category's spend last month | Strongest predictor — habits are sticky |
 | `PrevPrevMonthSpend` | This category's spend two months ago | Second data point to smooth noise |
 | `RollingAvg3` | 3-month rolling average for this category | Robust smoothed baseline, reduces outlier sensitivity |
+| `CategoryMean` | Training-set mean spend for the category | Gives the model category-scale context |
+| `CategoryMedian` | Training-set median spend for the category | Robust category baseline |
+| `CategoryStd` | Training-set spend volatility for the category | Captures whether the category is stable or variable |
+| `LagDelta` | Last month minus two months ago | Captures short-term direction of change |
+| `LagToMeanRatio` | Last month relative to category mean | Shows whether recent spend is above/below normal |
+| `MonthSin`, `MonthCos` | Cyclical month encoding | Represents seasonality without treating December and January as far apart |
 
 **Target:** `MonthlySpend` — total spent in this category this month.
 
@@ -186,18 +192,37 @@ MonthlySpend = base_score + Tree1(X) + Tree2(X) + ... + Tree200(X)
 
 ---
 
-### Model 6: Stacking Ensemble
-**What it is:** RF and XGBoost make predictions. Those predictions become features for a meta-learner (Linear Regression) that learns the optimal combination.
+### Model 6: RandomForestLog
+**What it is:** A Random Forest wrapped in a log-target transform. The model learns on `log1p(MonthlySpend)` and predictions are transformed back with `expm1`.
 
-**Final prediction:**
+**Why log target helps:** Monthly spending is right-skewed: many categories are small and a few categories are large. The log transform compresses large values during training, reducing the impact of outliers while preserving positive predictions.
+
+### Why log-transform the target?
+MonthlySpend is right-skewed — most categories spend $20-200/month
+but Mortgage spends $1,200/month. Training directly on raw values means
+the model optimises heavily for large-value categories.
+
+log1p(x) = log(x + 1) compresses large values:
+  log1p(1200) = 7.09   vs   log1p(50) = 3.93
+  Raw ratio: 24x apart → Log ratio: 1.8x apart
+
+The model learns proportional patterns in log-space, then we recover
+real dollar predictions with expm1(prediction).
+
+Why +1? log(0) is undefined. Adding 1 handles zero-spend months safely.
+
+Tradeoff: Errors in log-space don't directly translate to dollar errors.
+A log-space error of 0.1 means ~10% dollar error regardless of category
+size — which is actually fairer than raw-space MAE.
+
+**Final prediction shape:**
 ```
-Final = w_rf * RF_prediction + w_xgb * XGB_prediction + bias
+prediction = expm1(RandomForest(log1p(MonthlySpend)))
 ```
-The meta-learner might learn that XGBoost is more reliable for stable categories (Mortgage) but RF is better for volatile ones (Entertainment).
 
-**Why 5-fold CV in stacking:** Base model predictions for the meta-learner are generated via cross-validation — the meta-learner never sees predictions made on data the base model was trained on. Without this, the meta-learner would overfit to in-sample predictions.
+**Why it won:** After excluding `Credit Card Payment` and adding category-scale features, `RandomForestLog` achieved the best combination of high R² and low MAE on the chronological test split.
 
-**Tradeoff:** Slower to train. Marginal gains over the best single model on small datasets. High value in production with larger data.
+**Tradeoff:** Less directly interpretable than Ridge, and SHAP is generated from the plain Random Forest candidate for simpler tree-based interpretation.
 
 ---
 
@@ -206,7 +231,7 @@ The meta-learner might learn that XGBoost is more reliable for stable categories
 ### How metrics are computed
 Metrics are computed across **ALL rows in the test set** — all categories, all test months combined. A model that's terrible at predicting Mortgage ($1,200/month) will have much higher MAE than one that's bad at Music ($10/month), because errors are in dollars.
 
-**Per-category metrics (V2 improvement):** Filter test set by category and compute MAE separately for each. Tells you where the model struggles specifically.
+**Per-category metrics:** Filter test set by category and compute MAE separately for each. Tells you where the model struggles specifically.
 
 ### MAE — Mean Absolute Error
 ```
@@ -272,8 +297,35 @@ joblib is optimised for numpy arrays and sklearn objects — significantly faste
 | `model.pkl` | The trained best model — loaded by FastAPI at startup |
 | `label_encoder.pkl` | Must apply identical category→integer mapping at inference time |
 | `features.pkl` | Enforces correct feature order — ML models are sensitive to column order |
+| `category_stats.pkl` | Stores train-only category means/medians/stds used for inference features |
+| `best_model_name.pkl` | Stores the selected model name returned by the API |
 | `model_comparison.csv` | Served by the API to the frontend's model comparison table |
 
 ---
 
 *Document maintained throughout build. Last updated: Day 2.*
+
+## 10. Improving R²
+
+The original global model had low R² because it mixed normal spending with
+`Credit Card Payment`, which behaves like a payoff/transfer category rather
+than day-to-day spend. That category dominated the target variance and made
+the model look worse globally.
+
+The updated training pipeline excludes `Credit Card Payment` from the ML
+target and adds train-only category statistics (`CategoryMean`,
+`CategoryMedian`, `CategoryStd`) plus lag-derived features. This keeps the
+prediction task focused on spend categories and gives the model category-scale
+context without leaking test data.
+
+Final selected model: `RandomForestLog`, a Random Forest wrapped in a
+log-target transform. On the chronological test split it achieved:
+
+- MAE: ~$26.35
+- RMSE: ~$50.29
+- R²: ~0.9685
+
+Interview answer: "The low R² came from treating credit card payoff transfers
+as ordinary expenses. After excluding that transfer category and adding
+train-only category statistics, the best model explained most of the test-set
+variance while keeping MAE low."
