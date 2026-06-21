@@ -1,0 +1,11 @@
+# Ignore Python virtual environments
+ml/venv/
+.venv/
+venv/
+
+# Ignore Python cache files
+**/__pycache__/
+*.pyc
+
+# Ignore large data files or local models (optional but recommended)
+# ml/data/spending.csv
