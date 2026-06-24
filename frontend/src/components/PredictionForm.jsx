@@ -1,19 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { fetchCategories, fetchPrediction } from "../api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { fetchCategories, fetchLastKnownExpense, fetchPrediction } from "../api";
+import { useAuth } from "../context/auth";
 
 const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
 ];
 
 function getDefaultTarget() {
@@ -49,6 +40,7 @@ function formatCurrency(value) {
 }
 
 export default function PredictionForm({ onResult, onLoading }) {
+  const { token } = useAuth();
   const defaultTarget = getDefaultTarget();
   const [categories, setCategories] = useState([]);
   const [form, setForm] = useState({
@@ -60,6 +52,9 @@ export default function PredictionForm({ onResult, onLoading }) {
     threeMonthsAgoSpend: "",
   });
   const [error, setError] = useState(null);
+  // { type: "success" | "warning", message: string } | null
+  const [historyBanner, setHistoryBanner] = useState(null);
+  const fetchingRef = useRef(false);
 
   useEffect(() => {
     fetchCategories()
@@ -104,6 +99,77 @@ export default function PredictionForm({ onResult, onLoading }) {
     setForm({ ...form, [e.target.name]: e.target.value });
   }
 
+  async function handleCategoryChange(e) {
+    const category = e.target.value;
+    setForm((f) => ({ ...f, category }));
+    setHistoryBanner(null);
+
+    if (!category || !token) return;
+
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+
+    try {
+      const data = await fetchLastKnownExpense(category);
+      // data: { prev_month_spend, prev_prev_month_spend, rolling_avg_3, last_year, last_month }
+      const threeMonthsSpend =
+        data.rolling_avg_3 !== null && data.rolling_avg_3 !== undefined
+          ? Number(
+              (
+                data.rolling_avg_3 * 3 -
+                (data.prev_month_spend ?? 0) -
+                (data.prev_prev_month_spend ?? 0)
+              ).toFixed(2)
+            )
+          : "";
+
+      setForm((f) => ({
+        ...f,
+        category,
+        year:
+          data.last_year !== undefined && data.last_year !== null
+            ? Math.min(
+                Math.max(
+                  Number(data.last_year) + (Number(data.last_month) === 12 ? 1 : 0),
+                  2018
+                ),
+                2030
+              )
+            : f.year,
+        month:
+          data.last_month !== undefined && data.last_month !== null
+            ? (Number(data.last_month) % 12) + 1
+            : f.month,
+        lastMonthSpend:
+          data.prev_month_spend !== null && data.prev_month_spend !== undefined
+            ? String(data.prev_month_spend)
+            : f.lastMonthSpend,
+        twoMonthsAgoSpend:
+          data.prev_prev_month_spend !== null && data.prev_prev_month_spend !== undefined
+            ? String(data.prev_prev_month_spend)
+            : f.twoMonthsAgoSpend,
+        threeMonthsAgoSpend:
+          threeMonthsSpend !== "" ? String(threeMonthsSpend) : f.threeMonthsAgoSpend,
+      }));
+
+      const monthName = data.last_month ? MONTHS[Number(data.last_month) - 1] : "";
+      setHistoryBanner({
+        type: "success",
+        message: `Pre-filled from your expense history (last logged: ${monthName} ${data.last_year ?? ""})`,
+      });
+    } catch (err) {
+      if (err.status === 404) {
+        setHistoryBanner({
+          type: "warning",
+          message: "No history for this category — enter manually",
+        });
+      }
+      // Other errors (network, auth): stay silent — user can still type
+    } finally {
+      fetchingRef.current = false;
+    }
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     if (!isReady) return;
@@ -137,33 +203,47 @@ export default function PredictionForm({ onResult, onLoading }) {
   }
 
   const inputClass =
-    "w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100";
-  const labelClass = "block text-sm font-medium text-slate-700 mb-1.5";
+    "w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
+  const labelClass = "block text-sm font-medium text-gray-700 mb-1.5";
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow">
       <div className="mb-5">
-        <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
+        <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
           Spending forecast
         </p>
-        <h2 className="mt-1 text-xl font-semibold text-slate-950">
-          Plan the next month
-        </h2>
+        <h2 className="mt-1 text-xl font-semibold text-gray-900">Plan the next month</h2>
       </div>
 
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
           {error}
         </div>
       )}
 
+      {historyBanner && (
+        <div
+          className={`mb-4 flex items-start gap-2 rounded-xl border px-4 py-3 text-sm ${
+            historyBanner.type === "success"
+              ? "border-green-200 bg-green-50 text-green-800"
+              : "border-yellow-200 bg-yellow-50 text-yellow-800"
+          }`}
+        >
+          <span className="mt-px text-base leading-none">
+            {historyBanner.type === "success" ? "✅" : "⚠️"}
+          </span>
+          <span>{historyBanner.message}</span>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-5">
+        {/* Category */}
         <div>
           <label className={labelClass}>Category</label>
           <select
             name="category"
             value={form.category}
-            onChange={handleChange}
+            onChange={handleCategoryChange}
             className={inputClass}
             required
           >
@@ -175,6 +255,7 @@ export default function PredictionForm({ onResult, onLoading }) {
           </select>
         </div>
 
+        {/* Year + Month */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className={labelClass}>Forecast year</label>
@@ -206,21 +287,18 @@ export default function PredictionForm({ onResult, onLoading }) {
           </div>
         </div>
 
+        {/* Monthly spend inputs */}
         <div className="space-y-3">
           <div className="flex items-end justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">
-                Recent spending
-              </h3>
-              <p className="text-xs text-slate-500">
+              <h3 className="text-sm font-semibold text-gray-900">Recent spending</h3>
+              <p className="text-xs text-gray-500">
                 Enter the amount spent in this category for each month.
               </p>
             </div>
-            <div className="hidden rounded-md bg-slate-100 px-3 py-2 text-right text-xs text-slate-600 sm:block">
-              <span className="block font-semibold text-slate-900">
-                {rollingAverage === null
-                  ? "$0.00"
-                  : formatCurrency(rollingAverage)}
+            <div className="hidden rounded-xl bg-gray-100 px-3 py-2 text-right text-xs text-gray-500 sm:block">
+              <span className="block font-semibold text-gray-900">
+                {rollingAverage === null ? "$0.00" : formatCurrency(rollingAverage)}
               </span>
               3-month average
             </div>
@@ -233,13 +311,13 @@ export default function PredictionForm({ onResult, onLoading }) {
           ].map(([name, label]) => (
             <div
               key={name}
-              className="grid grid-cols-[minmax(0,1fr)_minmax(120px,160px)] items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+              className="grid grid-cols-[minmax(0,1fr)_minmax(120px,160px)] items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-3 py-2"
             >
-              <label htmlFor={name} className="text-sm font-medium text-slate-700">
+              <label htmlFor={name} className="text-sm font-medium text-gray-700">
                 {label}
               </label>
               <div className="relative">
-                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
                   $
                 </span>
                 <input
@@ -251,7 +329,7 @@ export default function PredictionForm({ onResult, onLoading }) {
                   placeholder="0.00"
                   min={0}
                   step="0.01"
-                  className="w-full rounded-md border border-slate-300 bg-white py-2 pl-7 pr-3 text-right text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                  className="w-full rounded-xl border border-gray-200 bg-white py-2 pl-7 pr-3 text-right text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                   required
                 />
               </div>
@@ -259,27 +337,24 @@ export default function PredictionForm({ onResult, onLoading }) {
           ))}
         </div>
 
+        {/* Summary tiles */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
-            <p className="text-xs font-medium text-emerald-700">
-              Calculated average
-            </p>
-            <p className="mt-1 text-lg font-semibold text-emerald-950">
+          <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3">
+            <p className="text-xs font-medium text-blue-600">Calculated average</p>
+            <p className="mt-1 text-lg font-semibold text-blue-900">
               {rollingAverage === null ? "$0.00" : formatCurrency(rollingAverage)}
             </p>
           </div>
-          <div className="rounded-md border border-slate-200 bg-white px-4 py-3">
-            <p className="text-xs font-medium text-slate-500">Recent trend</p>
-            <p className="mt-1 text-sm font-semibold text-slate-900">
-              {trendLabel}
-            </p>
+          <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
+            <p className="text-xs font-medium text-gray-500">Recent trend</p>
+            <p className="mt-1 text-sm font-semibold text-gray-900">{trendLabel}</p>
           </div>
         </div>
 
         <button
           type="submit"
           disabled={!isReady}
-          className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+          className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
         >
           Predict my spend
         </button>

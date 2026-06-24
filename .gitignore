@@ -9,3 +9,14 @@ venv/
 
 # Ignore large data files or local models (optional but recommended)
 # ml/data/spending.csv
+
+# Environment variable files — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Node dependencies
+node_modules/
+
+# Vite / build output
+frontend/dist/
