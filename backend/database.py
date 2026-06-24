@@ -27,16 +27,58 @@ import urllib.parse
 #   DATABASE_URL=mysql+pymysql://root:secret@localhost:3306/spendsmart
 # ---------------------------------------------------------------------------
 
-raw_password = "Bb786***0000"
-encoded_password = urllib.parse.quote_plus(raw_password)
+# 1. Pull the connection string from environment variables (defaults to your PUBLIC Railway instance)
+RAW_URL = os.environ.get(
+    "DATABASE_URL",
+    "mysql://root:oCfJUIRmLCQsiFITeToWAbecNBIoatqE@YOUR_PUBLIC_HOST_HERE.railway.app:YOUR_PORT/railway" # <-- Paste the PUBLIC one here!
+)
 
-#DATABASE_URL = os.environ.get(
-#  "DATABASE_URL",
-#   f"mysql+pymysql://root:{encoded_password}@127.0.0.1:3306/spendsmart"
-#)
+# 2. Parse and format for SQLAlchemy + PyMySQL compatibility
+if RAW_URL.startswith("mysql://") or RAW_URL.startswith("mysql+pymysql://"):
+    # Strip existing prefix to normalize tracking
+    clean_url = RAW_URL.replace("mysql+pymysql://", "").replace("mysql://", "")
+    
+    try:
+        # Separate connection details from query parameters if any exist
+        if "?" in clean_url:
+            connection_part, query_params = clean_url.split("?", 1)
+            query_suffix = f"?{query_params}"
+        else:
+            connection_part = clean_url
+            query_suffix = ""
+            
+        # Extract credentials and host/database data
+        credentials, host_db = connection_part.split("@", 1)
+        username, password = credentials.split(":", 1)
+        
+        # Safely URL-encode the password to escape special characters automatically
+        encoded_password = urllib.parse.quote_plus(password)
+        
+        # Reconstruct final production connection URL
+        DATABASE_URL = f"mysql+pymysql://{username}:{encoded_password}@{host_db}{query_suffix}"
+    except Exception:
+        # Fallback formatting if manual extraction encounters a parsing edge case
+        if RAW_URL.startswith("mysql://"):
+            DATABASE_URL = RAW_URL.replace("mysql://", "mysql+pymysql://", 1)
+        else:
+            DATABASE_URL = RAW_URL
+else:
+    DATABASE_URL = RAW_URL
 
-DATABASE_URL = "mysql+pymysql://root:{encoded_password}@localhost:3306/spendsmart"
-DATABASE_URL = "mysql+pymysql://root:@127.0.0.1:3307/spendsmart"
+# 3. Initialize SQLAlchemy core components
+# pool_pre_ping=True drops dead connections automatically before trying to use them
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 
 
 # ---------------------------------------------------------------------------
